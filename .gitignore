@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Electron/Vite build output
+out/
+release/
+dist/
+.vite/
+
+# Local caches and generated runtime state
+.electron-cache/
+.tmp/
+*.log
+*.bak-*
+
+# Local agent/workspace metadata
+.agents/
+.codex/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
