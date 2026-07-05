@@ -8,7 +8,7 @@ import {
   Settings2,
   Trash2
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ReactElement } from 'react';
 import type { AppState, ApplyResult, ProviderProfile, ToolTarget } from '../../shared/types';
 import claudeLogo from './assets/agents/claude-color.svg';
@@ -24,6 +24,9 @@ function App(): ReactElement {
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('正在读取本地配置...');
+  const [toastVisible, setToastVisible] = useState(true);
+  const [toastHovered, setToastHovered] = useState(false);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [startupError, setStartupError] = useState('');
   const [configPreview, setConfigPreview] = useState('');
   const [promptPreview, setPromptPreview] = useState('');
@@ -50,6 +53,20 @@ function App(): ReactElement {
     const fetchedModels = modelOptionsByProvider[providerOptionsKey(selectedAgent.id, activeProvider.id)] || [];
     return fetchedModels.length > 0 ? fetchedModels : activeProvider.modelOptions || [];
   }, [activeProvider, modelOptionsByProvider, selectedAgent]);
+
+  useEffect(() => {
+    if (!message) {
+      setToastVisible(false);
+      return clearToastTimer;
+    }
+
+    setToastVisible(true);
+    clearToastTimer();
+    if (!toastHovered) {
+      toastTimerRef.current = setTimeout(() => setToastVisible(false), 3000);
+    }
+    return clearToastTimer;
+  }, [message, toastHovered]);
 
   useEffect(() => {
     if (!window.agentRouter) {
@@ -137,6 +154,13 @@ function App(): ReactElement {
         </section>
       </main>
     );
+  }
+
+  function clearToastTimer(): void {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = undefined;
+    }
   }
 
   function updateAgent(id: string, patch: Partial<ToolTarget>): void {
@@ -311,9 +335,17 @@ function App(): ReactElement {
 
   return (
     <main className="app-shell">
-      <div className="toast-message" role="status" aria-live="polite">
-        <span>{message}</span>
-      </div>
+      {toastVisible && message && (
+        <div
+          className="toast-message"
+          role="status"
+          aria-live="polite"
+          onMouseEnter={() => setToastHovered(true)}
+          onMouseLeave={() => setToastHovered(false)}
+        >
+          <span>{message}</span>
+        </div>
+      )}
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">AR</div>

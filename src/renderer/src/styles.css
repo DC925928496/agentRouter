@@ -131,7 +131,19 @@ label {
   z-index: 40;
   width: min(720px, calc(100vw - 40px));
   transform: translateX(-50%);
-  pointer-events: none;
+  pointer-events: auto;
+  animation: toast-in 160ms ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 
 .toast-message span {
