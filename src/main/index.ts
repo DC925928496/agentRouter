@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
 import { execFileSync } from 'node:child_process';
 import { access, copyFile, mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { constants, watch, type FSWatcher } from 'node:fs';
@@ -992,6 +992,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   ipcMain.handle('state:load', loadState);
   ipcMain.handle('state:save', async (_event, state: AppState) => saveState(state));
   ipcMain.handle('target:apply', async (_event, targetId: string, state: AppState) => {
