@@ -1,6 +1,6 @@
 {
   "name": "agentrouter",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Windows desktop app for switching Codex, Claude Code, and Gemini provider settings.",
   "main": "out/main/index.js",
   "type": "module",
@@ -36,6 +36,7 @@
     "files": [
       "out/**"
     ],
+    "electronDist": "node_modules/electron/dist",
     "win": {
       "target": "nsis",
       "signAndEditExecutable": false

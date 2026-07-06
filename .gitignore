@@ -1,9 +1,11 @@
 # Dependencies
 node_modules/
+.pnpm-store/
 
 # Electron/Vite build output
 out/
 release/
+release-new/
 dist/
 .vite/
 
