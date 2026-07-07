@@ -1,13 +1,24 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { access, copyFile, mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { constants, watch, type FSWatcher } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import type { AppState, ApplyResult, ModelListResult, ProviderProfile, ToolTarget } from '../shared/types';
+import type {
+  AppState,
+  ApplyResult,
+  CapabilityAgentId,
+  CapabilityApplyResult,
+  LocalCapability,
+  ModelListResult,
+  ProviderProfile,
+  ToolTarget
+} from '../shared/types';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFile);
 const defaultGlobalPrompt = 'You are a pragmatic coding agent. Prefer direct execution, concise updates, and verified results.';
 const fileWatchers = new Map<string, { watcher: FSWatcher; debounce?: NodeJS.Timeout }>();
 const environmentCache = new Map<string, string | undefined>();
@@ -15,6 +26,8 @@ const legacyCodexConfigPath = '%USERPROFILE%/.codex/config.toml';
 const legacyCodexPromptPath = '%USERPROFILE%/.codex/AGENTS.md';
 const managedBlockStart = '# >>> Agent Router managed';
 const managedBlockEnd = '# <<< Agent Router managed';
+const capabilityBlockStart = '# >>> Agent Router capabilities';
+const capabilityBlockEnd = '# <<< Agent Router capabilities';
 const claudeCodeModelOptions = ['default', 'best', 'fable', 'opus', 'sonnet', 'haiku', 'sonnet[1m]', 'opus[1m]', 'opusplan', 'opusplan[1m]'];
 const claudeCodeModelOptionSet = new Set(claudeCodeModelOptions);
 const claudeCodeEffortOptions = ['', 'auto', 'low', 'medium', 'high'];
@@ -57,6 +70,7 @@ function cloneDefaultProviders(): ProviderProfile[] {
 }
 
 const defaultState: AppState = {
+  capabilities: [],
   targets: [
     {
       id: 'codex',
@@ -121,7 +135,9 @@ const defaultState: AppState = {
         '{',
         '  "apiEndpoint": {{json.provider.baseUrl}},',
         '  "apiKey": {{json.provider.apiKey}},',
-        '  "model": {{json.provider.defaultModel}}',
+        '  "model": {',
+        '    "name": {{json.provider.defaultModel}}',
+        '  }',
         '{{globalTemplate}}',
         '}'
       ].join('\n')
@@ -182,8 +198,39 @@ function normalizeState(input: LegacyAppState): AppState {
     : legacyProviders?.[0]?.id;
 
   return {
-    targets: normalizeTargets(input.targets, legacyProviders, legacyActiveProviderId, input.globalPrompt)
+    targets: normalizeTargets(input.targets, legacyProviders, legacyActiveProviderId, input.globalPrompt),
+    capabilities: normalizeCapabilities(input.capabilities)
   };
+}
+
+function normalizeCapabilities(capabilities: unknown): LocalCapability[] {
+  if (!Array.isArray(capabilities)) {
+    return [];
+  }
+  return capabilities
+    .filter(isRecord)
+    .map((capability) => {
+      const kind = capability.kind === 'skill' ? 'skill' : 'plugin';
+      const agent = normalizeCapabilityAgent(capability.agent);
+      return {
+        id: String(capability.id || `${agent}:${kind}:${capability.path || capability.name || crypto.randomUUID()}`),
+        kind,
+        agent,
+        name: String(capability.name || capability.displayName || 'local-capability'),
+        displayName: String(capability.displayName || capability.name || 'Local capability'),
+        version: String(capability.version || ''),
+        marketplace: capability.marketplace ? String(capability.marketplace) : undefined,
+        path: String(capability.path || ''),
+        description: capability.description ? String(capability.description) : '',
+        enabledTargets: Array.isArray(capability.enabledTargets)
+          ? capability.enabledTargets.filter((target): target is CapabilityAgentId => target === 'codex' || target === 'claude' || target === 'gemini')
+          : []
+      };
+    });
+}
+
+function normalizeCapabilityAgent(value: unknown): CapabilityAgentId {
+  return value === 'claude' || value === 'gemini' ? value : 'codex';
 }
 
 function normalizeProvider(provider: Partial<ProviderProfile>): ProviderProfile {
@@ -987,6 +1034,478 @@ function modelId(model: unknown): string | undefined {
   return typeof id === 'string' ? id : undefined;
 }
 
+async function scanLocalCapabilities(savedCapabilities: LocalCapability[] = []): Promise<LocalCapability[]> {
+  const saved = new Map(savedCapabilities.map((capability) => [capability.id, capability.enabledTargets]));
+  const capabilities: LocalCapability[] = [];
+  const codexConfig = await readTextIfExists(path.join(codexHomePath(), 'config.toml'));
+  const codexPluginState = parseCodexPluginState(codexConfig);
+  const codexSkillState = parseCodexSkillState(codexConfig);
+  const claudeSettings = await readJsonIfExists(path.join(os.homedir(), '.claude', 'settings.json'));
+  const claudePluginState = isRecord(claudeSettings.enabledPlugins) ? claudeSettings.enabledPlugins : {};
+
+  capabilities.push(...await scanPluginManifests(
+    path.join(codexHomePath(), 'plugins', 'cache'),
+    'codex',
+    '.codex-plugin',
+    (key) => codexPluginState.get(key) === true,
+    saved
+  ));
+  capabilities.push(...await scanSkillFiles(
+    path.join(codexHomePath(), 'skills'),
+    'codex',
+    (skillPath) => codexSkillState.get(normalizePathKey(skillPath)) ?? !skillPath.includes(`${path.sep}.system${path.sep}`),
+    saved
+  ));
+  capabilities.push(...await scanPluginManifests(
+    path.join(os.homedir(), '.claude', 'plugins', 'cache'),
+    'claude',
+    '.claude-plugin',
+    (key) => claudePluginState[key] === true,
+    saved
+  ));
+  capabilities.push(...await scanSkillFiles(
+    path.join(os.homedir(), '.claude', 'skills'),
+    'claude',
+    (skillPath) => claudePluginState[`${path.basename(path.dirname(skillPath))}@skills-dir`] !== false,
+    saved
+  ));
+  capabilities.push(...await scanGeminiExtensions(saved));
+  capabilities.push(...await scanGeminiSkills(saved));
+
+  const uniqueCapabilities = [...new Map(capabilities.map((capability) => [capability.id, capability])).values()];
+  return uniqueCapabilities.sort((left, right) => `${left.agent}:${left.kind}:${left.displayName}`.localeCompare(`${right.agent}:${right.kind}:${right.displayName}`));
+}
+
+async function scanPluginManifests(
+  root: string,
+  agent: CapabilityAgentId,
+  markerDir: string,
+  isEnabled: (key: string) => boolean,
+  saved: Map<string, CapabilityAgentId[]>
+): Promise<LocalCapability[]> {
+  const files = await findFiles(root, 'plugin.json', 8);
+  const capabilities: LocalCapability[] = [];
+
+  for (const filePath of files.filter((item) => item.includes(`${path.sep}${markerDir}${path.sep}`))) {
+    const manifest = await readJsonIfExists(filePath);
+    if (!isRecord(manifest)) {
+      continue;
+    }
+
+    const packageRoot = path.dirname(path.dirname(filePath));
+    const version = String(manifest.version || path.basename(packageRoot));
+    const marketplace = marketplaceNameFromCachePath(root, packageRoot);
+    const name = stableId(String(manifest.name || path.basename(path.dirname(packageRoot))));
+    const displayName = String(
+      isRecord(manifest.interface) && manifest.interface.displayName
+        ? manifest.interface.displayName
+        : manifest.name || name
+    );
+    const key = `${name}@${marketplace}`;
+    const id = `${agent}:plugin:${key}`;
+
+    capabilities.push({
+      id,
+      agent,
+      kind: 'plugin',
+      name,
+      displayName,
+      version,
+      marketplace,
+      path: packageRoot,
+      description: String(manifest.description || ''),
+      enabledTargets: saved.get(id) || (isEnabled(key) ? [agent] : [])
+    });
+  }
+
+  return capabilities;
+}
+
+async function scanSkillFiles(
+  root: string,
+  agent: CapabilityAgentId,
+  isEnabled: (skillPath: string) => boolean,
+  saved: Map<string, CapabilityAgentId[]>
+): Promise<LocalCapability[]> {
+  const files = await findFiles(root, 'SKILL.md', 5);
+  const capabilities: LocalCapability[] = [];
+
+  for (const filePath of files) {
+    if (agent === 'codex' && filePath.includes(`${path.sep}.system${path.sep}`)) {
+      continue;
+    }
+    const meta = parseSkillFrontMatter(await readTextIfExists(filePath));
+    const name = stableId(meta.name || path.basename(path.dirname(filePath)));
+    const id = `${agent}:skill:${normalizePathKey(filePath)}`;
+    capabilities.push({
+      id,
+      agent,
+      kind: 'skill',
+      name,
+      displayName: meta.name || name,
+      version: '',
+      path: filePath,
+      description: meta.description || '',
+      enabledTargets: saved.get(id) || (isEnabled(filePath) ? [agent] : [])
+    });
+  }
+
+  return capabilities;
+}
+
+async function applyLocalCapabilities(capabilities: LocalCapability[]): Promise<CapabilityApplyResult[]> {
+  const results: CapabilityApplyResult[] = [];
+  const codexCapabilities = capabilities.filter((capability) => capability.agent === 'codex');
+  const claudeCapabilities = capabilities.filter((capability) => capability.agent === 'claude');
+  const geminiCapabilities = capabilities.filter((capability) => capability.agent === 'gemini');
+
+  if (codexCapabilities.length > 0) {
+    const filePath = path.join(codexHomePath(), 'config.toml');
+    const content = mergeCodexCapabilities(await readTextIfExists(filePath), codexCapabilities);
+    const written = await writeRenderedFile(filePath, content);
+    results.push({ ...written, updated: codexCapabilities.length });
+  }
+
+  if (claudeCapabilities.length > 0) {
+    const filePath = path.join(os.homedir(), '.claude', 'settings.json');
+    const settings = await readJsonIfExists(filePath);
+    const enabledPlugins = isRecord(settings.enabledPlugins) ? { ...settings.enabledPlugins } : {};
+    for (const capability of claudeCapabilities) {
+      enabledPlugins[claudeCapabilityKey(capability)] = capability.enabledTargets.includes('claude');
+    }
+    const content = JSON.stringify({ ...settings, enabledPlugins }, null, 2);
+    const written = await writeRenderedFile(filePath, content);
+    results.push({ ...written, updated: claudeCapabilities.length });
+  }
+
+  if (geminiCapabilities.length > 0) {
+    for (const capability of geminiCapabilities) {
+      await setGeminiCapabilityEnabled(capability, capability.enabledTargets.includes('gemini'));
+    }
+    results.push({
+      filePath: path.join(os.homedir(), '.gemini', 'settings.json'),
+      bytes: 0,
+      updated: geminiCapabilities.length
+    });
+  }
+
+  return results;
+}
+
+async function scanGeminiExtensions(saved: Map<string, CapabilityAgentId[]>): Promise<LocalCapability[]> {
+  const output = await runCli('gemini', ['extensions', 'list', '--output-format', 'json']).catch(() => '[]');
+  const parsed = parseJsonFromOutput(output);
+  const entries = Array.isArray(parsed) ? parsed.filter(isRecord) : [];
+
+  return entries.map((entry) => {
+    const name = stableId(String(entry.name || entry.id || entry.extensionName || 'extension'));
+    const id = `gemini:plugin:${name}`;
+    const enabled = entry.enabled !== false && entry.disabled !== true;
+    return {
+      id,
+      agent: 'gemini',
+      kind: 'plugin',
+      name,
+      displayName: String(entry.displayName || entry.name || name),
+      version: String(entry.version || ''),
+      marketplace: 'gemini',
+      path: String(entry.path || entry.installPath || path.join(os.homedir(), '.gemini')),
+      description: String(entry.description || ''),
+      enabledTargets: saved.get(id) || (enabled ? ['gemini'] : [])
+    };
+  });
+}
+
+async function scanGeminiSkills(saved: Map<string, CapabilityAgentId[]>): Promise<LocalCapability[]> {
+  const output = await runCli('gemini', ['skills', 'list', '--all']).catch(() => '');
+  const skills = parseGeminiSkillList(output);
+  return skills.map((skill) => {
+    const id = `gemini:skill:${normalizePathKey(skill.path)}`;
+    return {
+      id,
+      agent: 'gemini',
+      kind: 'skill',
+      name: skill.name,
+      displayName: skill.name,
+      version: '',
+      path: skill.path,
+      description: skill.description,
+      enabledTargets: saved.get(id) || (skill.enabled ? ['gemini'] : [])
+    };
+  });
+}
+
+function parseGeminiSkillList(output: string): Array<{ name: string; description: string; path: string; enabled: boolean }> {
+  const lines = output.replace(/\r\n/g, '\n').split('\n');
+  const skills: Array<{ name: string; description: string; path: string; enabled: boolean }> = [];
+  let current: { name: string; description: string; path: string; enabled: boolean; builtIn: boolean } | undefined;
+
+  for (const line of lines) {
+    const header = line.match(/^([A-Za-z0-9_-]+)\s+\[(Enabled|Disabled)\](.*)$/);
+    if (header) {
+      if (current?.path && !current.builtIn) {
+        skills.push(current);
+      }
+      current = {
+        name: stableId(header[1]),
+        description: '',
+        path: '',
+        enabled: header[2] === 'Enabled',
+        builtIn: header[3].includes('Built-in')
+      };
+      continue;
+    }
+
+    if (!current) {
+      continue;
+    }
+    const description = line.match(/^\s*Description:\s*(.*)$/)?.[1];
+    if (description) {
+      current.description = description.trim();
+    }
+    const location = line.match(/^\s*Location:\s*(.*)$/)?.[1];
+    if (location) {
+      current.path = location.trim();
+    }
+  }
+
+  if (current?.path && !current.builtIn) {
+    skills.push(current);
+  }
+  return skills;
+}
+
+function parseJsonFromOutput(output: string): unknown {
+  const trimmed = output.trim();
+  const start = Math.min(...['{', '['].map((char) => {
+    const index = trimmed.indexOf(char);
+    return index < 0 ? Number.POSITIVE_INFINITY : index;
+  }));
+  if (!Number.isFinite(start)) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed.slice(start));
+  } catch {
+    return undefined;
+  }
+}
+
+async function setGeminiCapabilityEnabled(capability: LocalCapability, enabled: boolean): Promise<void> {
+  if (capability.kind === 'plugin') {
+    await runCli('gemini', ['extensions', enabled ? 'enable' : 'disable', '--scope', 'user', capability.name]);
+    return;
+  }
+
+  await runCli('gemini', enabled ? ['skills', 'enable', capability.name] : ['skills', 'disable', '--scope', 'user', capability.name]);
+}
+
+async function runCli(command: string, args: string[], cwd = os.homedir()): Promise<string> {
+  const executable = process.platform === 'win32' ? 'cmd' : command;
+  const finalArgs = process.platform === 'win32' ? ['/c', command, ...args] : args;
+  const { stdout, stderr } = await execFileAsync(executable, finalArgs, {
+    cwd,
+    windowsHide: true,
+    timeout: 120000,
+    maxBuffer: 1024 * 1024 * 8
+  });
+  return `${stdout || ''}${stderr || ''}`.trim();
+}
+
+function mergeCodexCapabilities(existing: string, capabilities: LocalCapability[]): string {
+  const pluginKeys = new Set(capabilities.filter((item) => item.kind === 'plugin').map(codexCapabilityKey));
+  const skillPaths = new Set(capabilities.filter((item) => item.kind === 'skill').map((item) => normalizePathKey(item.path)));
+  const preserved = stripCodexCapabilityBlocks(existing, pluginKeys, skillPaths).trimEnd();
+  const block = buildCodexCapabilitiesBlock(capabilities);
+  return preserved ? `${preserved}\n\n${block}` : block;
+}
+
+function buildCodexCapabilitiesBlock(capabilities: LocalCapability[]): string {
+  const lines = [capabilityBlockStart, '# Managed by Agent Router'];
+  for (const capability of capabilities.filter((item) => item.kind === 'plugin')) {
+    lines.push('', `[plugins.${JSON.stringify(codexCapabilityKey(capability))}]`, `enabled = ${capability.enabledTargets.includes('codex')}`);
+  }
+  for (const capability of capabilities.filter((item) => item.kind === 'skill')) {
+    lines.push('', '[[skills.config]]', `path = ${JSON.stringify(capability.path)}`, `enabled = ${capability.enabledTargets.includes('codex')}`);
+  }
+  lines.push(capabilityBlockEnd, '');
+  return lines.join('\n');
+}
+
+function stripCodexCapabilityBlocks(existing: string, pluginKeys: Set<string>, skillPaths: Set<string>): string {
+  const withoutManagedBlock = existing.replace(
+    new RegExp(`${escapeRegExp(capabilityBlockStart)}[\\s\\S]*?${escapeRegExp(capabilityBlockEnd)}\\r?\\n?`, 'g'),
+    ''
+  );
+  const lines = withoutManagedBlock.replace(/\r\n/g, '\n').split('\n');
+  const kept: string[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const pluginKey = line.match(/^\s*\[plugins\."([^"]+)"\]\s*$/)?.[1];
+    if (pluginKey && pluginKeys.has(pluginKey)) {
+      index = nextTomlTableIndex(lines, index + 1);
+      continue;
+    }
+
+    if (/^\s*\[\[skills\.config\]\]\s*$/.test(line)) {
+      const nextIndex = nextTomlTableIndex(lines, index + 1);
+      const block = lines.slice(index, nextIndex);
+      const skillPath = block.join('\n').match(/^\s*path\s*=\s*"([^"]+)"/m)?.[1];
+      if (skillPath && skillPaths.has(normalizePathKey(skillPath))) {
+        index = nextIndex;
+        continue;
+      }
+      kept.push(...block);
+      index = nextIndex;
+      continue;
+    }
+
+    kept.push(line);
+    index += 1;
+  }
+
+  return kept.join('\n');
+}
+
+function nextTomlTableIndex(lines: string[], startIndex: number): number {
+  let index = startIndex;
+  while (index < lines.length && !/^\s*\[/.test(lines[index])) {
+    index += 1;
+  }
+  return index;
+}
+
+function parseCodexPluginState(content: string): Map<string, boolean> {
+  const state = new Map<string, boolean>();
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  let activeKey = '';
+
+  for (const line of lines) {
+    const pluginKey = line.match(/^\s*\[plugins\."([^"]+)"\]\s*$/)?.[1];
+    if (pluginKey) {
+      activeKey = pluginKey;
+      continue;
+    }
+    if (/^\s*\[/.test(line)) {
+      activeKey = '';
+      continue;
+    }
+    const enabled = line.match(/^\s*enabled\s*=\s*(true|false)\s*$/)?.[1];
+    if (activeKey && enabled) {
+      state.set(activeKey, enabled === 'true');
+    }
+  }
+
+  return state;
+}
+
+function parseCodexSkillState(content: string): Map<string, boolean> {
+  const state = new Map<string, boolean>();
+  const blocks = content.replace(/\r\n/g, '\n').split(/(?=^\s*\[\[skills\.config\]\]\s*$)/m);
+  for (const block of blocks) {
+    if (!block.includes('[[skills.config]]')) {
+      continue;
+    }
+    const skillPath = block.match(/^\s*path\s*=\s*"([^"]+)"/m)?.[1];
+    const enabled = block.match(/^\s*enabled\s*=\s*(true|false)\s*$/m)?.[1];
+    if (skillPath && enabled) {
+      state.set(normalizePathKey(skillPath), enabled === 'true');
+    }
+  }
+  return state;
+}
+
+function codexCapabilityKey(capability: LocalCapability): string {
+  return capability.kind === 'plugin'
+    ? `${capability.name}@${capability.marketplace || 'local'}`
+    : capability.path;
+}
+
+function claudeCapabilityKey(capability: LocalCapability): string {
+  return capability.kind === 'plugin'
+    ? `${capability.name}@${capability.marketplace || 'local'}`
+    : `${capability.name}@skills-dir`;
+}
+
+function marketplaceNameFromCachePath(root: string, packageRoot: string): string {
+  const relative = path.relative(root, packageRoot).split(path.sep);
+  return relative[0] || 'local';
+}
+
+async function findFiles(root: string, fileName: string, maxDepth: number): Promise<string[]> {
+  const found: string[] = [];
+
+  async function walk(dir: string, depth: number): Promise<void> {
+    if (depth > maxDepth) {
+      return;
+    }
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isFile() && entry.name === fileName) {
+        found.push(entryPath);
+      }
+      if (entry.isDirectory()) {
+        await walk(entryPath, depth + 1);
+      }
+    }
+  }
+
+  await walk(root, 0);
+  return found;
+}
+
+async function readTextIfExists(filePath: string): Promise<string> {
+  try {
+    return await readFile(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+async function readJsonIfExists(filePath: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await readFile(filePath, 'utf8')) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseSkillFrontMatter(content: string): { name?: string; description?: string } {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) {
+    return {};
+  }
+  const meta: { name?: string; description?: string } = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const item = line.match(/^([A-Za-z_-]+):\s*(.*)$/);
+    if (!item) {
+      continue;
+    }
+    const value = item[2].trim().replace(/^['"]|['"]$/g, '');
+    if (item[1] === 'name') {
+      meta.name = value;
+    }
+    if (item[1] === 'description') {
+      meta.description = value;
+    }
+  }
+  return meta;
+}
+
+function normalizePathKey(filePath: string): string {
+  return path.normalize(filePath).toLowerCase();
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -1012,6 +1531,8 @@ app.whenReady().then(() => {
     return results;
   });
   ipcMain.handle('provider:models', async (_event, provider: ProviderProfile) => fetchProviderModels(provider));
+  ipcMain.handle('capability:scan', async (_event, state: AppState) => scanLocalCapabilities(normalizeCapabilities(state.capabilities)));
+  ipcMain.handle('capability:apply', async (_event, capabilities: LocalCapability[]) => applyLocalCapabilities(normalizeCapabilities(capabilities)));
   ipcMain.handle('target:read', async (_event, filePath: string) => {
     return readFile(resolveKnownDefaultPath(filePath), 'utf8');
   });

@@ -504,6 +504,7 @@ label {
 
 .provider-editor,
 .prompt-editor,
+.capability-manager,
 .targets-band {
   padding: 18px;
 }
@@ -597,6 +598,126 @@ label {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.capability-manager {
+  display: grid;
+  gap: 12px;
+}
+
+.capability-count {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  border: 1px solid rgba(10, 111, 103, 0.22);
+  border-radius: 999px;
+  background: #e8f4ef;
+  color: var(--route-dark);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.capability-list {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffaf0;
+}
+
+.empty-capabilities {
+  padding: 12px;
+}
+
+.capability-row {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(128px, 0.24fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 66px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.capability-row:first-child {
+  border-top: 0;
+}
+
+.capability-main {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+
+.capability-kind {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.capability-kind.plugin {
+  border-color: rgba(10, 111, 103, 0.24);
+  background: #e8f4ef;
+  color: var(--route-dark);
+}
+
+.capability-main b {
+  display: block;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.capability-main p,
+.capability-meta,
+.empty-capabilities {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.capability-main p {
+  margin: 3px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capability-meta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.capability-meta span,
+.capability-meta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capability-meta span {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.capability-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .badge {
@@ -836,6 +957,15 @@ label {
   .agent-workbench,
   .template-grid {
     grid-template-columns: 1fr;
+  }
+
+  .capability-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .capability-actions {
+    justify-content: flex-start;
   }
 
   .provider-list.horizontal {

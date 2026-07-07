@@ -1,7 +1,9 @@
 import {
   Copy,
   FileCode2,
+  FolderOpen,
   KeyRound,
+  Package,
   Plus,
   RefreshCw,
   Save,
@@ -10,12 +12,18 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ReactElement } from 'react';
-import type { AppState, ApplyResult, ProviderProfile, ToolTarget } from '../../shared/types';
+import type {
+  AppState,
+  ApplyResult,
+  ProviderProfile,
+  ToolTarget
+} from '../../shared/types';
 import claudeLogo from './assets/agents/claude-color.svg';
 import geminiLogo from './assets/agents/gemini-color.svg';
 import openaiLogo from './assets/agents/openai-color.svg';
 
 const emptyState: AppState = {
+  capabilities: [],
   targets: []
 };
 
@@ -53,6 +61,10 @@ function App(): ReactElement {
     const fetchedModels = modelOptionsByProvider[providerOptionsKey(selectedAgent.id, activeProvider.id)] || [];
     return fetchedModels.length > 0 ? fetchedModels : activeProvider.modelOptions || [];
   }, [activeProvider, modelOptionsByProvider, selectedAgent]);
+  const selectedCapabilities = useMemo(
+    () => (state.capabilities || []).filter((capability) => capability.agent === selectedAgent?.id),
+    [selectedAgent?.id, state.capabilities]
+  );
 
   useEffect(() => {
     if (!message) {
@@ -76,10 +88,12 @@ function App(): ReactElement {
 
     window.agentRouter
       .loadState()
-      .then((loaded) => {
+      .then(async (loaded) => {
         setState(loaded);
         setSelectedAgentId(loaded.targets[0]?.id || '');
         setMessage('配置已加载');
+        const capabilities = await window.agentRouter.scanCapabilities(loaded);
+        setState({ ...loaded, capabilities });
       })
       .catch((error: Error) => setStartupError(error.message));
   }, []);
@@ -328,6 +342,19 @@ function App(): ReactElement {
       setMessage(`${generated.trim() ? `${agent.name} 通用配置已从当前配置生成` : `${agent.name} 当前配置没有可保留的通用配置`}${promptMessage}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '通用配置生成失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function scanCapabilities(currentState = state): Promise<void> {
+    setBusy(true);
+    try {
+      const capabilities = await window.agentRouter.scanCapabilities(currentState);
+      setState({ ...currentState, capabilities });
+      setMessage(`已扫描 ${capabilities.length} 个本地 plugin / skill`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '本地能力扫描失败');
     } finally {
       setBusy(false);
     }
@@ -716,6 +743,46 @@ function App(): ReactElement {
               </div>
             </div>
           </section>
+
+          <section className="panel capability-manager">
+            <div className="section-title spread">
+              <span><Package size={18} /> 本地 plugin / skill</span>
+              <div className="global-actions">
+                <span className="capability-count">{selectedCapabilities.length} 项</span>
+                <button className="secondary" disabled={busy} onClick={() => scanCapabilities()}>
+                  <RefreshCw size={16} /> 扫描
+                </button>
+              </div>
+            </div>
+
+            <div className="capability-list">
+              {selectedCapabilities.length === 0 && (
+                <div className="empty-capabilities">
+                  还没有扫描到本地能力。
+                </div>
+              )}
+              {selectedCapabilities.map((capability) => (
+                <div className="capability-row" key={capability.id}>
+                  <div className="capability-main">
+                    <span className={`capability-kind ${capability.kind}`}>{capabilityKindLabel(capability.kind)}</span>
+                    <div>
+                      <b>{capability.displayName}</b>
+                      <p>{capability.description || capability.path}</p>
+                    </div>
+                  </div>
+                  <div className="capability-meta">
+                    <span>{capability.version || '未标版本'}</span>
+                    <small>{capability.marketplace || capability.agent}</small>
+                  </div>
+                  <div className="capability-actions">
+                    <button className="secondary" title={capability.path} onClick={() => window.agentRouter.revealPath(capability.path)}>
+                      <FolderOpen size={16} /> 打开
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         </section>
       )}
     </main>
@@ -724,6 +791,10 @@ function App(): ReactElement {
 
 function providerOptionsKey(agentId: string, providerId: string): string {
   return `${agentId}:${providerId}`;
+}
+
+function capabilityKindLabel(kind: string): string {
+  return kind === 'plugin' ? 'Plugin' : 'Skill';
 }
 
 function ModelSelect({

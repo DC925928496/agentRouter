@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AppState, ApplyResult, ModelListResult, ProviderProfile } from '../shared/types';
+import type {
+  AppState,
+  ApplyResult,
+  LocalCapability,
+  ModelListResult,
+  ProviderProfile
+} from '../shared/types';
 
 type WatchedFile = {
   watchId: string;
@@ -15,6 +21,7 @@ const api = {
     ipcRenderer.invoke('target:apply', targetId, state),
   applyAll: (state: AppState): Promise<ApplyResult[]> => ipcRenderer.invoke('target:applyAll', state),
   fetchProviderModels: (provider: ProviderProfile): Promise<ModelListResult> => ipcRenderer.invoke('provider:models', provider),
+  scanCapabilities: (state: AppState): Promise<LocalCapability[]> => ipcRenderer.invoke('capability:scan', state),
   readTarget: (filePath: string): Promise<string> => ipcRenderer.invoke('target:read', filePath),
   watchTarget: (watchId: string, filePath: string): Promise<WatchedFile> => ipcRenderer.invoke('target:watch', watchId, filePath),
   unwatchTarget: (watchId?: string): Promise<void> => ipcRenderer.invoke('target:unwatch', watchId),

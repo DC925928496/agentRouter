@@ -36,6 +36,7 @@ export type ToolTarget = {
 
 export type AppState = {
   targets: ToolTarget[];
+  capabilities?: LocalCapability[];
 };
 
 export type ApplyResult = {
@@ -53,4 +54,28 @@ export type ModelListResult = {
   endpoint: string;
   models: string[];
   error?: string;
+};
+
+export type CapabilityKind = 'plugin' | 'skill';
+
+export type CapabilityAgentId = 'codex' | 'claude' | 'gemini';
+
+export type LocalCapability = {
+  id: string;
+  kind: CapabilityKind;
+  name: string;
+  displayName: string;
+  version: string;
+  agent: CapabilityAgentId;
+  marketplace?: string;
+  path: string;
+  description?: string;
+  enabledTargets: CapabilityAgentId[];
+};
+
+export type CapabilityApplyResult = {
+  filePath: string;
+  backupPath?: string;
+  bytes: number;
+  updated: number;
 };
