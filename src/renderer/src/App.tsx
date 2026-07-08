@@ -874,21 +874,24 @@ function stripCodexManagedConfig(content: string): string {
     .replace(/\r\n/g, '\n');
   const lines = withoutManagedBlock.split('\n');
   const kept: string[] = [];
+  let currentTable: string | undefined;
   let skippingManagedTable = false;
   const managedTopLevelKeys = new Set([
     'model',
     'model_provider',
     'model_reasoning_effort',
-    'model_context_window',
-    'model_verbosity',
-    'model_reasoning_summary',
-    'model_supports_reasoning_summaries'
+    'model_context_window'
+  ]);
+  const managedTables = new Set([
+    'model_providers.agent-router',
+    'model_providers."agent-router"'
   ]);
 
   for (const line of lines) {
-    const tableName = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/)?.[1]?.trim();
+    const tableName = parseTomlTableName(line);
     if (tableName) {
-      skippingManagedTable = tableName === 'model_providers.agent-router' || tableName.startsWith('model_providers.');
+      currentTable = tableName;
+      skippingManagedTable = managedTables.has(tableName);
       if (!skippingManagedTable) {
         kept.push(line);
       }
@@ -898,17 +901,27 @@ function stripCodexManagedConfig(content: string): string {
       continue;
     }
 
-    const key = line.match(/^\s*([A-Za-z0-9_-]+)\s*=/)?.[1];
-    if (key && managedTopLevelKeys.has(key)) {
-      continue;
-    }
-    if (line.trim() === '# Managed by Agent Router') {
-      continue;
+    if (!currentTable) {
+      const key = line.match(/^\s*([A-Za-z0-9_-]+)\s*=/)?.[1];
+      if (key && managedTopLevelKeys.has(key)) {
+        continue;
+      }
+      if (line.trim() === '# Managed by Agent Router') {
+        continue;
+      }
     }
     kept.push(line);
   }
 
   return trimBlankLines(kept.join('\n'));
+}
+
+function parseTomlTableName(line: string): string | undefined {
+  const arrayTable = line.match(/^\s*\[\[([^\]]+)]]\s*(?:#.*)?$/)?.[1]?.trim();
+  if (arrayTable) {
+    return arrayTable;
+  }
+  return line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/)?.[1]?.trim();
 }
 
 function stripJsonManagedConfig(

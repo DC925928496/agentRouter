@@ -26,6 +26,7 @@ const legacyCodexConfigPath = '%USERPROFILE%/.codex/config.toml';
 const legacyCodexPromptPath = '%USERPROFILE%/.codex/AGENTS.md';
 const managedBlockStart = '# >>> Agent Router managed';
 const managedBlockEnd = '# <<< Agent Router managed';
+const globalTemplateMarker = '# >>> Agent Router global-template';
 const capabilityBlockStart = '# >>> Agent Router capabilities';
 const capabilityBlockEnd = '# <<< Agent Router capabilities';
 const claudeCodeModelOptions = ['default', 'best', 'fable', 'opus', 'sonnet', 'haiku', 'sonnet[1m]', 'opus[1m]', 'opusplan', 'opusplan[1m]'];
@@ -85,7 +86,7 @@ const defaultState: AppState = {
       promptFilePath: legacyCodexPromptPath,
       filePath: legacyCodexConfigPath,
       backupRetention: 3,
-      note: 'Codex provider key is written directly into config.toml as api_key.',
+      note: 'Codex provider key is written as experimental_bearer_token for responses wire API.',
       template: [
         '# Managed by Agent Router',
         'model = "{{provider.defaultModel}}"',
@@ -96,8 +97,11 @@ const defaultState: AppState = {
         '[model_providers.agent-router]',
         'name = "{{provider.name}}"',
         'base_url = "{{provider.baseUrl}}"',
-        'api_key = "{{provider.apiKey}}"',
+        'experimental_bearer_token = "{{provider.apiKey}}"',
+        'wire_api = "responses"',
+        'requires_openai_auth = false',
         '',
+        globalTemplateMarker,
         '{{globalTemplate}}'
       ].join('\n')
     },
@@ -350,7 +354,15 @@ function shouldUpgradeDefaultTemplate(id: string, template: string): boolean {
     id === 'codex' &&
     template.includes('# Managed by Agent Router') &&
     template.includes('[model_providers.agent-router]') &&
-    (!template.includes('{{provider.reasoningEffortConfig}}') || !template.includes('{{provider.contextWindowConfig}}'))
+    (
+      !template.includes('{{provider.reasoningEffortConfig}}') ||
+      !template.includes('{{provider.contextWindowConfig}}') ||
+      !template.includes(globalTemplateMarker) ||
+      template.includes('api_key') ||
+      !template.includes('experimental_bearer_token') ||
+      !template.includes('wire_api = "responses"') ||
+      !template.includes('requires_openai_auth = false')
+    )
   ) {
     return true;
   }
@@ -539,8 +551,9 @@ async function applyTarget(target: ToolTarget, state: AppState): Promise<ApplyRe
 
   const resolvedPath = resolveTargetConfigPath(target);
   const rendered = renderTemplate(target.template, state, provider, target);
+  const { managedContent, globalContent } = splitManagedAndGlobal(rendered);
   const content = target.id === 'codex'
-    ? await mergeManagedCodexConfig(resolvedPath, rendered)
+    ? await mergeManagedCodexConfig(resolvedPath, managedContent, globalContent)
     : rendered;
   const written = await writeRenderedFile(resolvedPath, content, target.backupRetention);
   const promptFilePath = target.promptFilePath?.trim();
@@ -573,28 +586,106 @@ async function writeRenderedFile(filePath: string, content: string, backupRetent
   };
 }
 
-async function mergeManagedCodexConfig(filePath: string, rendered: string): Promise<string> {
+function splitManagedAndGlobal(content: string): { managedContent: string; globalContent: string } {
+  const markerIndex = content.indexOf(globalTemplateMarker);
+  if (markerIndex < 0) {
+    return { managedContent: content, globalContent: '' };
+  }
+  const managedContent = content.slice(0, markerIndex).trimEnd();
+  let globalContent = content.slice(markerIndex + globalTemplateMarker.length);
+  globalContent = globalContent.trimStart();
+  return { managedContent, globalContent };
+}
+
+async function mergeManagedCodexConfig(filePath: string, managedContent: string, globalContent: string): Promise<string> {
   try {
     const existing = await readFile(filePath, 'utf8');
-    return mergeManagedConfig(existing, rendered);
+    return mergeManagedConfig(existing, managedContent, globalContent);
   } catch {
-    return buildManagedBlock(rendered);
+    const { rootContent, tableContent } = splitTomlRootAndTables(globalContent);
+    return assembleCodexConfig('', rootContent, tableContent, managedContent);
   }
 }
 
-function mergeManagedConfig(existing: string, rendered: string): string {
-  const block = buildManagedBlock(rendered);
+function mergeManagedConfig(existing: string, managedContent: string, globalContent: string): string {
   const startIndex = existing.indexOf(managedBlockStart);
   const endIndex = existing.indexOf(managedBlockEnd);
 
   if (startIndex >= 0 && endIndex > startIndex) {
     const endLineIndex = existing.indexOf('\n', endIndex);
     const replaceEnd = endLineIndex >= 0 ? endLineIndex + 1 : existing.length;
-    return `${existing.slice(0, startIndex)}${block}${existing.slice(replaceEnd)}`;
+    const beforeBlock = existing.slice(0, startIndex);
+    let afterBlock = stripLegacyManagedConfig(existing.slice(replaceEnd), managedContent);
+    const preserved = `${beforeBlock}${afterBlock}`;
+    if (shouldAppendGlobalContent(preserved, globalContent)) {
+      afterBlock = mergeGlobalContent(afterBlock, globalContent);
+    }
+    return assembleCodexConfig(beforeBlock, afterBlock, '', managedContent);
   }
 
-  const preserved = stripLegacyManagedConfig(existing, rendered).trimEnd();
-  return preserved ? `${preserved}\n\n${block}` : block;
+  let preserved = stripLegacyManagedConfig(existing, managedContent).trimEnd();
+  if (shouldAppendGlobalContent(preserved, globalContent)) {
+    preserved = mergeGlobalContent(preserved, globalContent).trimEnd();
+  }
+  return assembleCodexConfig('', preserved, '', managedContent);
+}
+
+function assembleCodexConfig(beforeBlock: string, afterBlock: string, fallbackGlobalTables: string, managedContent: string): string {
+  const managedParts = splitTomlRootAndTables(managedContent);
+  const afterParts = splitTomlRootAndTables(afterBlock);
+  const fallbackTables = fallbackGlobalTables.trim();
+  const rootContent = joinConfigParts([afterParts.rootContent]);
+  const tableContent = joinConfigParts([managedParts.tableContent, afterParts.tableContent, fallbackTables]);
+  const block = buildManagedBlock(managedParts.rootContent);
+  return joinConfigParts([beforeBlock.trimEnd(), block.trimEnd(), rootContent, tableContent]) + '\n';
+}
+
+function mergeGlobalContent(existing: string, globalContent: string): string {
+  const existingParts = splitTomlRootAndTables(existing);
+  const globalParts = splitTomlRootAndTables(globalContent);
+  return joinConfigParts([
+    existingParts.rootContent,
+    globalParts.rootContent,
+    existingParts.tableContent,
+    globalParts.tableContent
+  ]);
+}
+
+function splitTomlRootAndTables(content: string): { rootContent: string; tableContent: string } {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const firstTableIndex = lines.findIndex((line) => Boolean(parseTableName(line)));
+  if (firstTableIndex < 0) {
+    return { rootContent: content.trim(), tableContent: '' };
+  }
+  return {
+    rootContent: lines.slice(0, firstTableIndex).join('\n').trim(),
+    tableContent: lines.slice(firstTableIndex).join('\n').trim()
+  };
+}
+
+function joinConfigParts(parts: string[]): string {
+  return parts
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function shouldAppendGlobalContent(preserved: string, globalContent: string): boolean {
+  const normalizedGlobal = normalizeConfigForComparison(globalContent);
+  if (!normalizedGlobal) {
+    return false;
+  }
+  return !normalizeConfigForComparison(preserved).includes(normalizedGlobal);
+}
+
+function normalizeConfigForComparison(content: string): string {
+  return content
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim())
+    .join('\n')
+    .trim();
 }
 
 function buildManagedBlock(content: string): string {
@@ -677,6 +768,10 @@ function collectTables(content: string): Set<string> {
 }
 
 function parseTableName(line: string): string | undefined {
+  const arrayMatch = line.match(/^\s*\[\[([^\]]+)]]\s*(?:#.*)?$/);
+  if (arrayMatch) {
+    return arrayMatch[1].trim();
+  }
   const match = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
   return match?.[1].trim();
 }
