@@ -19,7 +19,6 @@ export type ProviderProfile = {
 export type ToolTarget = {
   id: string;
   name: string;
-  enabled: boolean;
   activeProviderId: string;
   appliedProviderId?: string;
   providers: ProviderProfile[];
@@ -71,11 +70,4 @@ export type LocalCapability = {
   path: string;
   description?: string;
   enabledTargets: CapabilityAgentId[];
-};
-
-export type CapabilityApplyResult = {
-  filePath: string;
-  backupPath?: string;
-  bytes: number;
-  updated: number;
 };

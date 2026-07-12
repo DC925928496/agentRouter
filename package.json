@@ -1,6 +1,6 @@
 {
   "name": "agentrouter",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Windows desktop app for switching Codex, Claude Code, and Gemini provider settings.",
   "main": "out/main/index.js",
   "type": "module",

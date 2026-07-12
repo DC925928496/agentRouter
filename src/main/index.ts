@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, shell } from 'electron';
 import { execFile, execFileSync } from 'node:child_process';
 import { access, copyFile, mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { constants, watch, type FSWatcher } from 'node:fs';
@@ -6,11 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_GLOBAL_TEMPLATES } from '../shared/global-config';
 import type {
   AppState,
   ApplyResult,
   CapabilityAgentId,
-  CapabilityApplyResult,
   LocalCapability,
   ModelListResult,
   ProviderProfile,
@@ -32,6 +32,12 @@ const capabilityBlockEnd = '# <<< Agent Router capabilities';
 const claudeCodeModelOptions = ['default', 'best', 'fable', 'opus', 'sonnet', 'haiku', 'sonnet[1m]', 'opus[1m]', 'opusplan', 'opusplan[1m]'];
 const claudeCodeModelOptionSet = new Set(claudeCodeModelOptions);
 const claudeCodeEffortOptions = ['', 'auto', 'low', 'medium', 'high'];
+const defaultCodexSupportedReasoningLevels = [
+  { effort: 'low', description: 'Fast responses with lighter reasoning' },
+  { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+  { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+  { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' }
+];
 
 type LegacyAppState = Partial<AppState> & {
   activeProviderId?: string;
@@ -76,12 +82,11 @@ const defaultState: AppState = {
     {
       id: 'codex',
       name: 'Codex',
-      enabled: true,
       activeProviderId: 'openai',
       providers: cloneDefaultProviders(),
       globalPrompt: defaultGlobalPrompt,
       globalPromptEnabled: true,
-      globalTemplate: '',
+      globalTemplate: DEFAULT_GLOBAL_TEMPLATES.codex,
       globalTemplateEnabled: true,
       promptFilePath: legacyCodexPromptPath,
       filePath: legacyCodexConfigPath,
@@ -108,12 +113,11 @@ const defaultState: AppState = {
     {
       id: 'claude',
       name: 'Claude Code',
-      enabled: true,
       activeProviderId: 'anthropic',
       providers: cloneDefaultProviders(),
       globalPrompt: defaultGlobalPrompt,
       globalPromptEnabled: true,
-      globalTemplate: '',
+      globalTemplate: DEFAULT_GLOBAL_TEMPLATES.claude,
       globalTemplateEnabled: true,
       promptFilePath: '%USERPROFILE%/.claude/CLAUDE.md',
       filePath: '%USERPROFILE%/.claude/settings.json',
@@ -124,12 +128,11 @@ const defaultState: AppState = {
     {
       id: 'gemini',
       name: 'Gemini',
-      enabled: true,
       activeProviderId: 'gemini',
       providers: cloneDefaultProviders(),
       globalPrompt: defaultGlobalPrompt,
       globalPromptEnabled: true,
-      globalTemplate: '',
+      globalTemplate: DEFAULT_GLOBAL_TEMPLATES.gemini,
       globalTemplateEnabled: true,
       promptFilePath: '%USERPROFILE%/.gemini/GEMINI.md',
       filePath: '%USERPROFILE%/.gemini/settings.json',
@@ -300,7 +303,6 @@ function normalizeTarget(
   return {
     id,
     name: String(target.name || defaultTarget?.name || 'Target'),
-    enabled: target.enabled ?? defaultTarget?.enabled ?? false,
     activeProviderId,
     appliedProviderId,
     providers: normalizedProviders,
@@ -552,10 +554,23 @@ async function applyTarget(target: ToolTarget, state: AppState): Promise<ApplyRe
   const resolvedPath = resolveTargetConfigPath(target);
   const rendered = renderTemplate(target.template, state, provider, target);
   const { managedContent, globalContent } = splitManagedAndGlobal(rendered);
-  const content = target.id === 'codex'
+  let content = target.id === 'codex'
     ? await mergeManagedCodexConfig(resolvedPath, managedContent, globalContent)
     : rendered;
+  if (target.id === 'codex') {
+    const enabledCodexCapabilities = enabledCapabilitiesForTarget(state.capabilities, 'codex');
+    if (enabledCodexCapabilities.length > 0) {
+      content = mergeCodexCapabilities(content, enabledCodexCapabilities);
+    }
+  }
   const written = await writeRenderedFile(resolvedPath, content, target.backupRetention);
+  if (target.id === 'codex') {
+    try {
+      await syncCodexModelCatalog(provider);
+    } catch (error) {
+      console.warn('Failed to sync Codex model catalog:', error);
+    }
+  }
   const promptFilePath = target.promptFilePath?.trim();
   const promptWritten = target.globalPromptEnabled !== false && promptFilePath
     ? await writeRenderedFile(resolveTargetPromptPath(target), target.globalPrompt || '', target.backupRetention)
@@ -614,19 +629,14 @@ function mergeManagedConfig(existing: string, managedContent: string, globalCont
   if (startIndex >= 0 && endIndex > startIndex) {
     const endLineIndex = existing.indexOf('\n', endIndex);
     const replaceEnd = endLineIndex >= 0 ? endLineIndex + 1 : existing.length;
-    const beforeBlock = existing.slice(0, startIndex);
+    const beforeBlock = stripLegacyManagedConfig(existing.slice(0, startIndex), managedContent).trimEnd();
     let afterBlock = stripLegacyManagedConfig(existing.slice(replaceEnd), managedContent);
-    const preserved = `${beforeBlock}${afterBlock}`;
-    if (shouldAppendGlobalContent(preserved, globalContent)) {
-      afterBlock = mergeGlobalContent(afterBlock, globalContent);
-    }
-    return assembleCodexConfig(beforeBlock, afterBlock, '', managedContent);
+    afterBlock = mergeGlobalContent(joinConfigParts([beforeBlock, afterBlock]), globalContent);
+    return assembleCodexConfig('', afterBlock, '', managedContent);
   }
 
   let preserved = stripLegacyManagedConfig(existing, managedContent).trimEnd();
-  if (shouldAppendGlobalContent(preserved, globalContent)) {
-    preserved = mergeGlobalContent(preserved, globalContent).trimEnd();
-  }
+  preserved = mergeGlobalContent(preserved, globalContent).trimEnd();
   return assembleCodexConfig('', preserved, '', managedContent);
 }
 
@@ -641,14 +651,11 @@ function assembleCodexConfig(beforeBlock: string, afterBlock: string, fallbackGl
 }
 
 function mergeGlobalContent(existing: string, globalContent: string): string {
-  const existingParts = splitTomlRootAndTables(existing);
-  const globalParts = splitTomlRootAndTables(globalContent);
-  return joinConfigParts([
-    existingParts.rootContent,
-    globalParts.rootContent,
-    existingParts.tableContent,
-    globalParts.tableContent
-  ]);
+  if (!normalizeConfigForComparison(globalContent)) {
+    return existing;
+  }
+  const preserved = stripTomlSections(existing, globalContent).trimEnd();
+  return joinConfigParts([preserved, globalContent]);
 }
 
 function splitTomlRootAndTables(content: string): { rootContent: string; tableContent: string } {
@@ -670,14 +677,6 @@ function joinConfigParts(parts: string[]): string {
     .join('\n\n');
 }
 
-function shouldAppendGlobalContent(preserved: string, globalContent: string): boolean {
-  const normalizedGlobal = normalizeConfigForComparison(globalContent);
-  if (!normalizedGlobal) {
-    return false;
-  }
-  return !normalizeConfigForComparison(preserved).includes(normalizedGlobal);
-}
-
 function normalizeConfigForComparison(content: string): string {
   return content
     .replace(/\r\n/g, '\n')
@@ -697,18 +696,26 @@ function buildManagedBlock(content: string): string {
 }
 
 function stripLegacyManagedConfig(existing: string, rendered: string): string {
+  return stripTomlSections(existing, rendered, { removeManagedMarker: true });
+}
+
+function stripTomlSections(
+  existing: string,
+  rendered: string,
+  options: { removeManagedMarker?: boolean } = {}
+): string {
   const managedKeys = collectTopLevelKeys(rendered);
   const managedTables = collectTables(rendered);
   const lines = existing.replace(/\r\n/g, '\n').split('\n');
   const kept: string[] = [];
   let skipManagedTable = false;
-  let inTable = false;
+  let inRoot = true;
 
   for (const line of lines) {
     const tableName = parseTableName(line);
     if (tableName) {
       skipManagedTable = managedTables.has(tableName);
-      inTable = !skipManagedTable;
+      inRoot = false;
       if (!skipManagedTable) {
         kept.push(line);
       }
@@ -719,14 +726,15 @@ function stripLegacyManagedConfig(existing: string, rendered: string): string {
       continue;
     }
 
-    if (!inTable) {
-      const key = parseTopLevelKey(line);
-      if (key && managedKeys.has(key)) {
-        continue;
-      }
-      if (line.trim() === '# Managed by Agent Router') {
-        continue;
-      }
+    // Always check top-level keys regardless of inRoot — keys like
+    // suppress_unstable_features_warning can appear after [table] headers
+    // in Codex configs, and inRoot never resets to true once it's false.
+    const key = parseTopLevelKey(line);
+    if (key && managedKeys.has(key)) {
+      continue;
+    }
+    if (inRoot && options.removeManagedMarker && line.trim() === '# Managed by Agent Router') {
+      continue;
     }
 
     kept.push(line);
@@ -779,6 +787,100 @@ function parseTableName(line: string): string | undefined {
 function parseTopLevelKey(line: string): string | undefined {
   const match = line.match(/^\s*([A-Za-z0-9_-]+)\s*=/);
   return match?.[1];
+}
+
+function normalizeModelCatalogSlug(model: string): string {
+  return model.trim().replace(/^models\//, '');
+}
+
+async function syncCodexModelCatalog(provider: ProviderProfile): Promise<void> {
+  const models = [
+    normalizeModelCatalogSlug(provider.defaultModel || ''),
+    ...(provider.modelOptions || []).map((model) => normalizeModelCatalogSlug(model))
+  ].filter(Boolean);
+  const uniqueModels = [...new Set(models)];
+  if (uniqueModels.length === 0) {
+    return;
+  }
+
+  const catalogPath = path.join(codexHomePath(), 'cc-switch-model-catalog.json');
+  const existingCatalog = await readJsonIfExists(catalogPath);
+  const existingModels = Array.isArray(existingCatalog.models)
+    ? existingCatalog.models.filter(isRecord).map((model) => ({ ...model }))
+    : [];
+  const knownSlugs = new Set(
+    existingModels
+      .map((model) => normalizeModelCatalogSlug(String(model.slug || '')))
+      .filter(Boolean)
+  );
+  const template = existingModels.find((model) => normalizeModelCatalogSlug(String(model.slug || '')));
+  const missingModels = uniqueModels.filter((model) => !knownSlugs.has(model));
+  if (missingModels.length === 0) {
+    return;
+  }
+
+  const nextCatalog = {
+    ...existingCatalog,
+    models: [
+      ...existingModels,
+      ...missingModels.map((model) => buildCodexModelCatalogEntry(model, template))
+    ]
+  };
+  await mkdir(path.dirname(catalogPath), { recursive: true });
+  await writeFile(catalogPath, JSON.stringify(nextCatalog, null, 2), 'utf8');
+}
+
+function buildCodexModelCatalogEntry(model: string, template?: Record<string, unknown>): Record<string, unknown> {
+  const base = template ? JSON.parse(JSON.stringify(template)) as Record<string, unknown> : {};
+  return {
+    ...base,
+    slug: model,
+    display_name: model,
+    description: `${model} via Agent Router custom provider`,
+    additional_speed_tiers: Array.isArray(base.additional_speed_tiers) ? base.additional_speed_tiers : [],
+    apply_patch_tool_type: typeof base.apply_patch_tool_type === 'string' ? base.apply_patch_tool_type : 'freeform',
+    availability_nux: base.availability_nux ?? null,
+    base_instructions: typeof base.base_instructions === 'string' ? base.base_instructions : '',
+    context_window: typeof base.context_window === 'number' ? base.context_window : 400000,
+    default_reasoning_level: typeof base.default_reasoning_level === 'string' ? base.default_reasoning_level : 'high',
+    default_reasoning_summary: typeof base.default_reasoning_summary === 'string' ? base.default_reasoning_summary : 'auto',
+    default_verbosity: typeof base.default_verbosity === 'string' ? base.default_verbosity : 'medium',
+    effective_context_window_percent: typeof base.effective_context_window_percent === 'number' ? base.effective_context_window_percent : 100,
+    experimental_supported_tools: Array.isArray(base.experimental_supported_tools) ? base.experimental_supported_tools : [],
+    input_modalities: Array.isArray(base.input_modalities) ? base.input_modalities : ['text'],
+    max_context_window: typeof base.max_context_window === 'number'
+      ? base.max_context_window
+      : (typeof base.context_window === 'number' ? base.context_window : 400000),
+    model_messages: isRecord(base.model_messages)
+      ? base.model_messages
+      : {
+          instructions_template: '',
+          instructions_variables: {
+            personality_default: '',
+            personality_friendly: '',
+            personality_pragmatic: ''
+          }
+        },
+    priority: typeof base.priority === 'number' ? base.priority : 1000,
+    service_tiers: Array.isArray(base.service_tiers) ? base.service_tiers : [],
+    shell_type: typeof base.shell_type === 'string' ? base.shell_type : 'shell_command',
+    support_verbosity: base.support_verbosity !== false,
+    supported_in_api: true,
+    supported_reasoning_levels: Array.isArray(base.supported_reasoning_levels) && base.supported_reasoning_levels.length > 0
+      ? base.supported_reasoning_levels
+      : defaultCodexSupportedReasoningLevels,
+    supports_image_detail_original: base.supports_image_detail_original !== false,
+    supports_parallel_tool_calls: base.supports_parallel_tool_calls !== false,
+    supports_reasoning_summaries: base.supports_reasoning_summaries !== false,
+    supports_search_tool: base.supports_search_tool !== false,
+    truncation_policy: isRecord(base.truncation_policy)
+      ? base.truncation_policy
+      : { limit: 10000, mode: 'tokens' },
+    upgrade: base.upgrade ?? null,
+    use_responses_lite: Boolean(base.use_responses_lite),
+    visibility: typeof base.visibility === 'string' ? base.visibility : 'list',
+    web_search_tool_type: typeof base.web_search_tool_type === 'string' ? base.web_search_tool_type : 'text_and_image'
+  };
 }
 
 function escapeRegExp(value: string): string {
@@ -1248,43 +1350,9 @@ async function scanSkillFiles(
   return capabilities;
 }
 
-async function applyLocalCapabilities(capabilities: LocalCapability[]): Promise<CapabilityApplyResult[]> {
-  const results: CapabilityApplyResult[] = [];
-  const codexCapabilities = capabilities.filter((capability) => capability.agent === 'codex');
-  const claudeCapabilities = capabilities.filter((capability) => capability.agent === 'claude');
-  const geminiCapabilities = capabilities.filter((capability) => capability.agent === 'gemini');
-
-  if (codexCapabilities.length > 0) {
-    const filePath = path.join(codexHomePath(), 'config.toml');
-    const content = mergeCodexCapabilities(await readTextIfExists(filePath), codexCapabilities);
-    const written = await writeRenderedFile(filePath, content);
-    results.push({ ...written, updated: codexCapabilities.length });
-  }
-
-  if (claudeCapabilities.length > 0) {
-    const filePath = path.join(os.homedir(), '.claude', 'settings.json');
-    const settings = await readJsonIfExists(filePath);
-    const enabledPlugins = isRecord(settings.enabledPlugins) ? { ...settings.enabledPlugins } : {};
-    for (const capability of claudeCapabilities) {
-      enabledPlugins[claudeCapabilityKey(capability)] = capability.enabledTargets.includes('claude');
-    }
-    const content = JSON.stringify({ ...settings, enabledPlugins }, null, 2);
-    const written = await writeRenderedFile(filePath, content);
-    results.push({ ...written, updated: claudeCapabilities.length });
-  }
-
-  if (geminiCapabilities.length > 0) {
-    for (const capability of geminiCapabilities) {
-      await setGeminiCapabilityEnabled(capability, capability.enabledTargets.includes('gemini'));
-    }
-    results.push({
-      filePath: path.join(os.homedir(), '.gemini', 'settings.json'),
-      bytes: 0,
-      updated: geminiCapabilities.length
-    });
-  }
-
-  return results;
+function enabledCapabilitiesForTarget(capabilities: unknown, agent: CapabilityAgentId): LocalCapability[] {
+  return normalizeCapabilities(capabilities)
+    .filter((capability) => capability.agent === agent && capability.enabledTargets.includes(agent));
 }
 
 async function scanGeminiExtensions(saved: Map<string, CapabilityAgentId[]>): Promise<LocalCapability[]> {
@@ -1384,15 +1452,6 @@ function parseJsonFromOutput(output: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-async function setGeminiCapabilityEnabled(capability: LocalCapability, enabled: boolean): Promise<void> {
-  if (capability.kind === 'plugin') {
-    await runCli('gemini', ['extensions', enabled ? 'enable' : 'disable', '--scope', 'user', capability.name]);
-    return;
-  }
-
-  await runCli('gemini', enabled ? ['skills', 'enable', capability.name] : ['skills', 'disable', '--scope', 'user', capability.name]);
 }
 
 async function runCli(command: string, args: string[], cwd = os.homedir()): Promise<string> {
@@ -1518,12 +1577,6 @@ function codexCapabilityKey(capability: LocalCapability): string {
     : capability.path;
 }
 
-function claudeCapabilityKey(capability: LocalCapability): string {
-  return capability.kind === 'plugin'
-    ? `${capability.name}@${capability.marketplace || 'local'}`
-    : `${capability.name}@skills-dir`;
-}
-
 function marketplaceNameFromCachePath(root: string, packageRoot: string): string {
   const relative = path.relative(root, packageRoot).split(path.sep);
   return relative[0] || 'local';
@@ -1617,20 +1670,8 @@ app.whenReady().then(() => {
     }
     return applyTarget(target, saved);
   });
-  ipcMain.handle('target:applyAll', async (_event, state: AppState) => {
-    const saved = await saveState(state);
-    const results: ApplyResult[] = [];
-    for (const target of saved.targets) {
-      results.push(await applyTarget(target, saved));
-    }
-    return results;
-  });
   ipcMain.handle('provider:models', async (_event, provider: ProviderProfile) => fetchProviderModels(provider));
   ipcMain.handle('capability:scan', async (_event, state: AppState) => scanLocalCapabilities(normalizeCapabilities(state.capabilities)));
-  ipcMain.handle('capability:apply', async (_event, capabilities: LocalCapability[]) => applyLocalCapabilities(normalizeCapabilities(capabilities)));
-  ipcMain.handle('target:read', async (_event, filePath: string) => {
-    return readFile(resolveKnownDefaultPath(filePath), 'utf8');
-  });
   ipcMain.handle('target:watch', async (event, watchId: string, filePath: string) => watchTargetFile(event.sender.id, watchId, filePath, (payload) => {
     if (!event.sender.isDestroyed()) {
       event.sender.send('target:changed', payload);
@@ -1648,14 +1689,6 @@ app.whenReady().then(() => {
     const result = await shell.showItemInFolder(resolvedPath);
     return result;
   });
-  ipcMain.handle('path:choose', async () => {
-    const result = await dialog.showOpenDialog({
-      title: 'Select config file',
-      properties: ['openFile', 'showHiddenFiles', 'createDirectory']
-    });
-    return result.canceled ? undefined : result.filePaths[0];
-  });
-
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

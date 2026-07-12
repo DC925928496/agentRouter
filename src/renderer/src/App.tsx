@@ -1,17 +1,16 @@
 import {
   Copy,
   FileCode2,
-  FolderOpen,
   KeyRound,
-  Package,
   Plus,
   RefreshCw,
   Save,
   Settings2,
   Trash2
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ReactElement } from 'react';
+import { mergeImportedGlobalConfig } from '../../shared/global-config';
 import type {
   AppState,
   ApplyResult,
@@ -23,7 +22,6 @@ import geminiLogo from './assets/agents/gemini-color.svg';
 import openaiLogo from './assets/agents/openai-color.svg';
 
 const emptyState: AppState = {
-  capabilities: [],
   targets: []
 };
 
@@ -61,10 +59,6 @@ function App(): ReactElement {
     const fetchedModels = modelOptionsByProvider[providerOptionsKey(selectedAgent.id, activeProvider.id)] || [];
     return fetchedModels.length > 0 ? fetchedModels : activeProvider.modelOptions || [];
   }, [activeProvider, modelOptionsByProvider, selectedAgent]);
-  const selectedCapabilities = useMemo(
-    () => (state.capabilities || []).filter((capability) => capability.agent === selectedAgent?.id),
-    [selectedAgent?.id, state.capabilities]
-  );
 
   useEffect(() => {
     if (!message) {
@@ -88,12 +82,10 @@ function App(): ReactElement {
 
     window.agentRouter
       .loadState()
-      .then(async (loaded) => {
+      .then((loaded) => {
         setState(loaded);
         setSelectedAgentId(loaded.targets[0]?.id || '');
         setMessage('配置已加载');
-        const capabilities = await window.agentRouter.scanCapabilities(loaded);
-        setState({ ...loaded, capabilities });
       })
       .catch((error: Error) => setStartupError(error.message));
   }, []);
@@ -305,9 +297,12 @@ function App(): ReactElement {
     }
   }
 
-  async function generateGlobalTemplate(agent: ToolTarget): Promise<void> {
+  async function importGlobalTemplate(agent: ToolTarget): Promise<void> {
     if (!agent.filePath) {
       setMessage(`${agent.name} 未设置配置文件路径`);
+      return;
+    }
+    if (!window.confirm('将以默认配置为基础合并当前配置，是否继续？')) {
       return;
     }
 
@@ -320,7 +315,7 @@ function App(): ReactElement {
         return;
       }
 
-      const generated = buildGlobalTemplateFromConfig(agent.id, payload.content);
+      const generated = mergeImportedGlobalConfig(agent.id, payload.content);
       const patch: Partial<ToolTarget> = {
         globalTemplate: generated,
         globalTemplateEnabled: true
@@ -339,22 +334,9 @@ function App(): ReactElement {
       }
 
       updateAgent(agent.id, patch);
-      setMessage(`${generated.trim() ? `${agent.name} 通用配置已从当前配置生成` : `${agent.name} 当前配置没有可保留的通用配置`}${promptMessage}`);
+      setMessage(`${agent.name} 默认配置已补齐并合并当前配置${promptMessage}`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '通用配置生成失败');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function scanCapabilities(currentState = state): Promise<void> {
-    setBusy(true);
-    try {
-      const capabilities = await window.agentRouter.scanCapabilities(currentState);
-      setState({ ...currentState, capabilities });
-      setMessage(`已扫描 ${capabilities.length} 个本地 plugin / skill`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '本地能力扫描失败');
+      setMessage(error instanceof Error ? error.message : '通用配置导入失败');
     } finally {
       setBusy(false);
     }
@@ -655,8 +637,8 @@ function App(): ReactElement {
 	              <div className="section-title spread">
 	                <span><FileCode2 size={18} /> 全局参与配置</span>
 	                <div className="global-actions">
-	                  <button className="secondary" disabled={busy} onClick={() => generateGlobalTemplate(selectedAgent)}>
-	                    <FileCode2 size={16} /> 从当前配置生成
+	                  <button className="secondary" disabled={busy} onClick={() => importGlobalTemplate(selectedAgent)}>
+	                    <FileCode2 size={16} /> 从当前配置导入
 	                  </button>
 	                  <div className="participation-badges">
 	                    <span className={selectedAgent.globalPromptEnabled !== false ? 'badge on' : 'badge'}>提示词</span>
@@ -727,7 +709,6 @@ function App(): ReactElement {
                 <label>
                   当前配置文件内容
                   <MarkdownView
-                    codeLanguage={languageForPath(selectedAgent.filePath)}
                     content={configPreview}
                     emptyText="配置文件不存在或暂无内容"
                   />
@@ -744,45 +725,6 @@ function App(): ReactElement {
             </div>
           </section>
 
-          <section className="panel capability-manager">
-            <div className="section-title spread">
-              <span><Package size={18} /> 本地 plugin / skill</span>
-              <div className="global-actions">
-                <span className="capability-count">{selectedCapabilities.length} 项</span>
-                <button className="secondary" disabled={busy} onClick={() => scanCapabilities()}>
-                  <RefreshCw size={16} /> 扫描
-                </button>
-              </div>
-            </div>
-
-            <div className="capability-list">
-              {selectedCapabilities.length === 0 && (
-                <div className="empty-capabilities">
-                  还没有扫描到本地能力。
-                </div>
-              )}
-              {selectedCapabilities.map((capability) => (
-                <div className="capability-row" key={capability.id}>
-                  <div className="capability-main">
-                    <span className={`capability-kind ${capability.kind}`}>{capabilityKindLabel(capability.kind)}</span>
-                    <div>
-                      <b>{capability.displayName}</b>
-                      <p>{capability.description || capability.path}</p>
-                    </div>
-                  </div>
-                  <div className="capability-meta">
-                    <span>{capability.version || '未标版本'}</span>
-                    <small>{capability.marketplace || capability.agent}</small>
-                  </div>
-                  <div className="capability-actions">
-                    <button className="secondary" title={capability.path} onClick={() => window.agentRouter.revealPath(capability.path)}>
-                      <FolderOpen size={16} /> 打开
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
         </section>
       )}
     </main>
@@ -791,10 +733,6 @@ function App(): ReactElement {
 
 function providerOptionsKey(agentId: string, providerId: string): string {
   return `${agentId}:${providerId}`;
-}
-
-function capabilityKindLabel(kind: string): string {
-  return kind === 'plugin' ? 'Plugin' : 'Skill';
 }
 
 function ModelSelect({
@@ -808,179 +746,30 @@ function ModelSelect({
   onChange: (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => void;
   placeholder: string;
 }): ReactElement {
-  if (models.length === 0) {
-    return <input value={value} onChange={onChange} placeholder={placeholder} />;
-  }
+  const listId = useId();
+  const suggestions = uniqueStrings(models);
 
-  const hasCurrentValue = Boolean(value);
-  const currentValueInModels = hasCurrentValue && models.includes(value);
   return (
-    <select value={value} onChange={onChange}>
-      {!hasCurrentValue && <option value="">{placeholder}</option>}
-      {hasCurrentValue && !currentValueInModels && <option value={value}>{value}（当前，不在模型列表）</option>}
-      {models.map((model) => (
-        <option value={model} key={model}>{model}</option>
-      ))}
-    </select>
+    <>
+      <input
+        list={suggestions.length > 0 ? listId : undefined}
+        value={value}
+        onChange={onChange}
+        placeholder={placeholder}
+      />
+      {suggestions.length > 0 && (
+        <datalist id={listId}>
+          {suggestions.map((model) => (
+            <option value={model} key={model} />
+          ))}
+        </datalist>
+      )}
+    </>
   );
 }
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
-}
-
-function buildGlobalTemplateFromConfig(agentId: string, content: string): string {
-  if (!content.trim()) {
-    return '';
-  }
-  if (agentId === 'codex') {
-    return stripCodexManagedConfig(content);
-  }
-	  if (agentId === 'claude') {
-	    return stripJsonManagedConfig(content, {
-	      topLevelKeys: ['model', 'effortLevel'],
-	      envKeys: [
-	        'ANTHROPIC_BASE_URL',
-	        'ANTHROPIC_AUTH_TOKEN',
-	        'ANTHROPIC_MODEL',
-	        'ANTHROPIC_SMALL_FAST_MODEL',
-	        'DISABLE_NONESSENTIAL_MODEL_CALLS',
-	        'ANTHROPIC_DEFAULT_SONNET_MODEL',
-	        'ANTHROPIC_DEFAULT_OPUS_MODEL',
-	        'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-	        'ANTHROPIC_DEFAULT_FABLE_MODEL',
-	        'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
-	        'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
-	        'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
-	        'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME',
-	        'CLAUDE_CODE_EFFORT_LEVEL'
-	      ],
-	      leadingComma: false
-	    });
-	  }
-	  if (agentId === 'gemini') {
-	    return stripJsonManagedConfig(content, {
-	      topLevelKeys: ['apiEndpoint', 'apiKey', 'model'],
-	      envKeys: [],
-	      leadingComma: true
-	    });
-	  }
-  return content.trim();
-}
-
-function stripCodexManagedConfig(content: string): string {
-  const withoutManagedBlock = content
-    .replace(/# >>> Agent Router managed[\s\S]*?# <<< Agent Router managed\r?\n?/g, '')
-    .replace(/\r\n/g, '\n');
-  const lines = withoutManagedBlock.split('\n');
-  const kept: string[] = [];
-  let currentTable: string | undefined;
-  let skippingManagedTable = false;
-  const managedTopLevelKeys = new Set([
-    'model',
-    'model_provider',
-    'model_reasoning_effort',
-    'model_context_window'
-  ]);
-  const managedTables = new Set([
-    'model_providers.agent-router',
-    'model_providers."agent-router"'
-  ]);
-
-  for (const line of lines) {
-    const tableName = parseTomlTableName(line);
-    if (tableName) {
-      currentTable = tableName;
-      skippingManagedTable = managedTables.has(tableName);
-      if (!skippingManagedTable) {
-        kept.push(line);
-      }
-      continue;
-    }
-    if (skippingManagedTable) {
-      continue;
-    }
-
-    if (!currentTable) {
-      const key = line.match(/^\s*([A-Za-z0-9_-]+)\s*=/)?.[1];
-      if (key && managedTopLevelKeys.has(key)) {
-        continue;
-      }
-      if (line.trim() === '# Managed by Agent Router') {
-        continue;
-      }
-    }
-    kept.push(line);
-  }
-
-  return trimBlankLines(kept.join('\n'));
-}
-
-function parseTomlTableName(line: string): string | undefined {
-  const arrayTable = line.match(/^\s*\[\[([^\]]+)]]\s*(?:#.*)?$/)?.[1]?.trim();
-  if (arrayTable) {
-    return arrayTable;
-  }
-  return line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/)?.[1]?.trim();
-}
-
-function stripJsonManagedConfig(
-  content: string,
-  options: { topLevelKeys: string[]; envKeys: string[]; leadingComma: boolean }
-): string {
-  try {
-    const parsed = JSON.parse(content) as unknown;
-    if (!isPlainObject(parsed)) {
-      return '';
-    }
-    const cleaned = removeManagedJsonKeys(parsed, options);
-    const keys = Object.keys(cleaned);
-    if (keys.length === 0) {
-      return '';
-    }
-	    const body = JSON.stringify(cleaned, null, 2).split('\n').slice(1, -1).join('\n');
-	    return body ? `${options.leadingComma ? ',\n' : ''}${body}` : '';
-  } catch {
-    return '';
-  }
-}
-
-function removeManagedJsonKeys(
-  source: Record<string, unknown>,
-  options: { topLevelKeys: string[]; envKeys: string[]; leadingComma: boolean }
-): Record<string, unknown> {
-  const cleaned: Record<string, unknown> = {};
-  const managedTopLevelKeys = new Set(options.topLevelKeys);
-  const managedEnvKeys = new Set(options.envKeys);
-
-  for (const [key, value] of Object.entries(source)) {
-    if (managedTopLevelKeys.has(key)) {
-      continue;
-    }
-    if (key === 'env' && isPlainObject(value)) {
-      const env = Object.fromEntries(
-        Object.entries(value).filter(([envKey]) => !managedEnvKeys.has(envKey))
-      );
-      if (Object.keys(env).length > 0) {
-        cleaned.env = env;
-      }
-      continue;
-    }
-    cleaned[key] = value;
-  }
-
-  return cleaned;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function trimBlankLines(value: string): string {
-  return value
-    .split('\n')
-    .join('\n')
-    .trim();
 }
 
 function markProviderApplied(state: AppState, agentId: string): AppState {
@@ -1020,144 +809,16 @@ function AgentIcon({ id }: { id: string }): ReactElement {
   );
 }
 
-function languageForPath(filePath: string): string {
-  const lowerPath = filePath.toLowerCase();
-  if (lowerPath.endsWith('.json')) return 'json';
-  if (lowerPath.endsWith('.toml')) return 'toml';
-  if (lowerPath.endsWith('.yaml') || lowerPath.endsWith('.yml')) return 'yaml';
-  if (lowerPath.endsWith('.md')) return '';
-  return 'text';
-}
-
-function MarkdownView({ content, emptyText, codeLanguage }: { content: string; emptyText: string; codeLanguage?: string }): ReactElement {
+function MarkdownView({ content, emptyText }: { content: string; emptyText: string }): ReactElement {
   if (!content.trim()) {
     return <div className="markdown-preview empty">{emptyText}</div>;
   }
 
-  const markdown = codeLanguage ? `\`\`\`${codeLanguage}\n${content}\n\`\`\`` : content;
-  return <div className="markdown-preview">{renderMarkdown(markdown)}</div>;
-}
-
-function renderMarkdown(markdown: string): ReactElement[] {
-  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
-  const blocks: ReactElement[] = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index];
-
-    if (!line.trim()) {
-      index += 1;
-      continue;
-    }
-
-    const fence = line.match(/^```(\w+)?\s*$/);
-    if (fence) {
-      const codeLines: string[] = [];
-      index += 1;
-      while (index < lines.length && !lines[index].startsWith('```')) {
-        codeLines.push(lines[index]);
-        index += 1;
-      }
-      index += 1;
-      blocks.push(
-        <pre className="md-code" key={`code-${index}`}>
-          <code>{codeLines.join('\n')}</code>
-        </pre>
-      );
-      continue;
-    }
-
-    const heading = line.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      const level = heading[1].length;
-      blocks.push(renderHeading(level, heading[2], `heading-${index}`));
-      index += 1;
-      continue;
-    }
-
-    if (/^>\s?/.test(line)) {
-      const quoteLines: string[] = [];
-      while (index < lines.length && /^>\s?/.test(lines[index])) {
-        quoteLines.push(lines[index].replace(/^>\s?/, ''));
-        index += 1;
-      }
-      blocks.push(<blockquote key={`quote-${index}`}>{quoteLines.map((quoteLine, quoteIndex) => <p key={quoteIndex}>{renderInlineMarkdown(quoteLine)}</p>)}</blockquote>);
-      continue;
-    }
-
-    if (/^\s*[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^\s*[-*]\s+/, ''));
-        index += 1;
-      }
-      blocks.push(<ul key={`ul-${index}`}>{items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}</ul>);
-      continue;
-    }
-
-    if (/^\s*\d+\.\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*\d+\.\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^\s*\d+\.\s+/, ''));
-        index += 1;
-      }
-      blocks.push(<ol key={`ol-${index}`}>{items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}</ol>);
-      continue;
-    }
-
-    const paragraphLines: string[] = [];
-    while (
-      index < lines.length &&
-      lines[index].trim() &&
-      !/^```/.test(lines[index]) &&
-      !/^(#{1,6})\s+/.test(lines[index]) &&
-      !/^>\s?/.test(lines[index]) &&
-      !/^\s*[-*]\s+/.test(lines[index]) &&
-      !/^\s*\d+\.\s+/.test(lines[index])
-    ) {
-      paragraphLines.push(lines[index]);
-      index += 1;
-    }
-    blocks.push(<p key={`p-${index}`}>{renderInlineMarkdown(paragraphLines.join(' '))}</p>);
-  }
-
-  return blocks;
-}
-
-function renderHeading(level: number, text: string, key: string): ReactElement {
-  if (level === 1) return <h1 key={key}>{renderInlineMarkdown(text)}</h1>;
-  if (level === 2) return <h2 key={key}>{renderInlineMarkdown(text)}</h2>;
-  if (level === 3) return <h3 key={key}>{renderInlineMarkdown(text)}</h3>;
-  return <h4 key={key}>{renderInlineMarkdown(text)}</h4>;
-}
-
-function renderInlineMarkdown(text: string): Array<ReactElement | string> {
-  const parts: Array<ReactElement | string> = [];
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(text.slice(lastIndex, match.index));
-    }
-    const token = match[0];
-    if (token.startsWith('`')) {
-      parts.push(<code key={`${match.index}-code`}>{token.slice(1, -1)}</code>);
-    } else if (token.startsWith('**')) {
-      parts.push(<strong key={`${match.index}-strong`}>{token.slice(2, -2)}</strong>);
-    } else {
-      parts.push(<em key={`${match.index}-em`}>{token.slice(1, -1)}</em>);
-    }
-    lastIndex = match.index + token.length;
-  }
-
-  if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
-  }
-
-  return parts;
+  return (
+    <pre className="markdown-preview">
+      <code>{content}</code>
+    </pre>
+  );
 }
 
 export default App;
