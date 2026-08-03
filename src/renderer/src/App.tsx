@@ -8,7 +8,7 @@ import {
   Settings2,
   Trash2
 } from 'lucide-react';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ReactElement } from 'react';
 import { mergeImportedGlobalConfig } from '../../shared/global-config';
 import type {
@@ -273,11 +273,7 @@ function App(): ReactElement {
         ...current,
         [key]: models
       }));
-      if (!provider.defaultModel && models[0]) {
-        updateProvider(agent.id, provider.id, { defaultModel: models[0], modelOptions: models });
-      } else {
-        updateProvider(agent.id, provider.id, { modelOptions: models });
-      }
+      updateProvider(agent.id, provider.id, { modelOptions: models });
       setMessage(`已获取 ${models.length} 个模型：${result.endpoint}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '模型列表获取失败');
@@ -554,6 +550,7 @@ function App(): ReactElement {
 	                      <option value="medium">medium</option>
 	                      <option value="high">high</option>
 	                      <option value="xhigh">xhigh</option>
+	                      <option value="max">max</option>
 	                    </select>
 	                  )}
 	                </label>
@@ -746,25 +743,24 @@ function ModelSelect({
   onChange: (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => void;
   placeholder: string;
 }): ReactElement {
-  const listId = useId();
   const suggestions = uniqueStrings(models);
 
   return (
-    <>
+    <div className="model-select-combo">
       <input
-        list={suggestions.length > 0 ? listId : undefined}
         value={value}
         onChange={onChange}
         placeholder={placeholder}
       />
       {suggestions.length > 0 && (
-        <datalist id={listId}>
+        <select value="" onChange={onChange} aria-label="选择模型">
+          <option value="">候选模型</option>
           {suggestions.map((model) => (
             <option value={model} key={model} />
           ))}
-        </datalist>
+        </select>
       )}
-    </>
+    </div>
   );
 }
 

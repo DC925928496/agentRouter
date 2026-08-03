@@ -528,6 +528,12 @@ label {
   gap: 8px;
 }
 
+.model-select-combo {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  gap: 8px;
+}
+
 .model-fetch {
   width: 38px;
   min-height: 38px;

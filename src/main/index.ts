@@ -36,7 +36,8 @@ const defaultCodexSupportedReasoningLevels = [
   { effort: 'low', description: 'Fast responses with lighter reasoning' },
   { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
   { effort: 'high', description: 'Greater reasoning depth for complex problems' },
-  { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' }
+  { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' },
+  { effort: 'max', description: 'Maximum reasoning depth for the hardest problems' }
 ];
 
 type LegacyAppState = Partial<AppState> & {
@@ -385,7 +386,7 @@ function shouldUpgradeDefaultTemplate(id: string, template: string): boolean {
 
 function normalizeReasoningEffort(value: unknown): string {
   const effort = String(value || '').trim();
-  return ['', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(effort) ? effort : '';
+  return ['', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort) ? effort : '';
 }
 
 function normalizeClaudeCodeEffort(value: unknown): string {
