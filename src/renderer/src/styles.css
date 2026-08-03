@@ -534,6 +534,12 @@ label {
   gap: 8px;
 }
 
+.model-select-combo select,
+.model-select-combo option {
+  background: var(--field);
+  color: var(--ink);
+}
+
 .model-fetch {
   width: 38px;
   min-height: 38px;

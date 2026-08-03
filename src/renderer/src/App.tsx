@@ -756,7 +756,7 @@ function ModelSelect({
         <select value="" onChange={onChange} aria-label="选择模型">
           <option value="">候选模型</option>
           {suggestions.map((model) => (
-            <option value={model} key={model} />
+            <option value={model} key={model}>{model}</option>
           ))}
         </select>
       )}
